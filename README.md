@@ -6,7 +6,7 @@ The idea is to run as a nightly cron job to back up developer code and leaking I
 ## Usage
 ```
 usage: git-backup.py [-h] [-u <username>] [--oauth <token>] [-o <path>]
-                     [--fork_list_only] [-v]
+                     [--fork_list_only] [-v] [--history <N>] [-p]
                      <repo>
 
 github repo backup
@@ -19,9 +19,13 @@ optional arguments:
   -u <username>, --user <username>
                         GitHub username
   --oauth <token>       GitHub OAuth token
-  -o <path>             Backup directory
-  --fork_list_only      Only print the list of users with forks or <repo>
+  -o <path>             Backup directory (default "./")
+  --fork_list_only      Only print the list of users with forks of <repo>
   -v, --verbose         Make verbose
+  --history <N>         Number of backups to maintain in backup dir. Older
+                        dirs will be checked and purged upon future backup
+                        (default 0 => forever)
+  -p, --purge_only      Only purge older backups
 ```
 
 ## Disclaimer
