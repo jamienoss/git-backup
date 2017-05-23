@@ -4,12 +4,21 @@ from getpass import getpass
 from io import BytesIO
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import timeit
 
 import pycurl
 
+class HttpError(Exception):
+    def __init__(self, _code, _message):
+        self.code = _code
+        self.message = _message
+
+    def str(self):
+        return 'http {0} - {1}'.format(self.code, self.message)
 
 class Session:
     api = 'https://api.github.com/'
@@ -19,6 +28,9 @@ class Session:
         self.password = None
         self.oauthToken = None
         self.c = pycurl.Curl()
+        self.nPages = 1
+        self.parseHeaderFlag = False
+        self.requestCount = 0
 
     def __del__(self):
         self.c.close()
@@ -41,31 +53,62 @@ class Session:
             self.password = getpass();
             self.c.setopt(self.c.PASSWORD, self.password)
 
-    def checkError(self, response):
+        # Test credentials before doing anything else
+        self.zenTest()
+
+    def getErrorMessage(self, response):
         if not response:
             return
-
         try:
-            if response[0]['message'] == 'Bad credentials':
-                sys.exit('ERROR: {0}'.format(response['message']))
+            return response['message']
         except KeyError:
-            pass
+           return None
 
-    def checkHTTP(self):
+    def checkError(self, response):
         respCode = self.c.getinfo(self.c.RESPONSE_CODE)
+
         if respCode >= 400:
-            sys.exit('ERROR: http {0}'.format(respCode))
+            raise HttpError(respCode, self.getErrorMessage(response))
 
     def zenTest(self):
         url = os.path.join(self.api, 'zen')
-        return self.doCurl(url)
+        body = self.doCurl(url)
+        if body:
+            try:
+                body = json.loads(body)
+            except json.JSONDecodeError:
+                pass
+        self.checkError(body)
+        return body
 
-    def doCurl(self, url, keepAlive=True):
+    def parseHeader(self, headerLine):
+        if not self.parseHeaderFlag:
+            return
+        headerLine = headerLine.decode('iso-8859-1')
+        self.getNPages(headerLine)
+
+    def getNPages(self, headerLine):
+        # To do: convert header to dict
+        if ':' not in headerLine:
+            return
+        name, value = headerLine.split(':', 1)
+        if name == 'Link':
+            regex = re.search('page=([0-9]+)>; rel="last"', value)
+            if regex:
+                self.nPages = int(regex.group(1))
+            else:
+                self.nPages = 1
+            return
+
+    def doCurl(self, url, keepAlive=True, parseHeader=True):
         buffer = BytesIO()
         self.c.setopt(self.c.URL, url)
         self.c.setopt(self.c.WRITEDATA, buffer)
+        self.c.setopt(self.c.HEADERFUNCTION, self.parseHeader)
+        self.c.setopt(self.c.FOLLOWLOCATION, True)
+        self.parseHeaderFlag = parseHeader
         self.c.perform()
-        self.checkHTTP()
+        self.requestCount += 1
 
         if not keepAlive:
             self.c.close()
@@ -73,9 +116,29 @@ class Session:
         return buffer.getvalue().decode('iso-8859-1')
 
     def getCurl(self, url, keepAlive=True):
-        body = self.doCurl(url, keepAlive)
-        response = json.loads(body)
-        self.checkError(response)
+        response = list()
+        url = url + '?per_page=100'  # Lower the total number of requests
+        body = self.doCurl(url, keepAlive=True, parseHeader=True)
+        if body:
+            body = json.loads(body)
+        self.checkError(body)
+        response.extend(body)
+
+        if self.nPages == 1:
+            if not keepAlive:
+                self.c.close()
+            return response
+
+        # There are more pages to GET
+        for page in range(2, self.nPages + 1):  # +1 := '<=' self.nPages rather than '<'
+            body = self.doCurl(url + '&page=' + str(page), keepAlive=True, parseHeader=False)
+            if body:
+                body = json.loads(body)
+            self.checkError(body)
+            response.extend(body)
+
+        if not keepAlive:
+            self.c.close()
         return response
 
     def getCollaborators(self, repo):
@@ -83,18 +146,25 @@ class Session:
         return self.getCurl(url)
 
     def getUsers(self, repo):
-        users = set()
+        users = list()
         response = self.getCollaborators(repo)
         for user in response:
-            users.add(user['login'])
+            users.append(user['login'])
+        users.sort()
         return users
 
-    def hasRepo(self, user, searchRepo):
-        url = os.path.join(self.api, 'users', user, 'repos')
+    def getOrgRepos(self, org):
+        url = os.path.join(self.api, 'orgs', org, 'repos')
         response = self.getCurl(url)
+        repos = list()
         for repo in response:
-            if repo['name'] == searchRepo:
-                return True
+            repos.append(repo['name'])
+        repos.sort()
+        return repos
+
+    def getRepos(self, user):
+        url = os.path.join(self.api, 'users', user, 'repos')
+        return self.getCurl(url)
 
 class Input:
     def __init__(self, _argv):
@@ -108,6 +178,7 @@ class Input:
         self.history = 0
         self.purgeOnly = False
         self.oAuthToken = None
+        self.org = False
 
     def parse(self):
         parser = argparse.ArgumentParser(description='github repo backup')
@@ -119,6 +190,8 @@ class Input:
                              help='GitHub OAuth token', default=self.oAuthToken)
         parser.add_argument('-o', metavar='<path>', dest='backupDir', nargs=1,
                              help='Backup directory (default "./")', default=self.backupDir)
+        parser.add_argument('--org', dest='org', action='store_true',
+                             help='Treats positional argument <repo> as a git organization to backup', default=self.org)
         parser.add_argument('--fork_list_only', dest='printForkListOnly', action='store_true', default=self.printForkListOnly,
                              help='Only print the list of users with forks of <repo>')
         parser.add_argument('-v', '--verbose', dest='verbose', action='store_true', default=self.verbose,
@@ -146,6 +219,8 @@ class Input:
         self.backupDir = args.backupDir[0]
         self.verbose = args.verbose
         self.printForkListOnly = args.printForkListOnly
+        self.org = args.org
+
         if args.history:
             self.history = int(args.history[0])
         self.purgeOnly = args.purgeOnly
@@ -171,29 +246,57 @@ def backupRepo(dir, repo):
     gitClone(repo)
     os.chdir(currentPath)
 
-def doBackup(input):
-    repoOrg, repoName = os.path.split(input.repo)
+def createDirTree(root, repoOrg, repoName):
+    # File hiarachy - :backDir/:timestamp/:org/:repo/:user
+    todaysDir = os.path.join(root, timeStamp())
+    orgDir = os.path.join(todaysDir, repoOrg)
+    repoDir = os.path.join(orgDir, repoName)
+    try:
+        os.mkdir(root)
+    except FileExistsError:
+        pass
+    try:
+        os.mkdir(todaysDir)
+    except FileExistsError:
+        pass
+    try:
+        os.mkdir(orgDir)
+    except FileExistsError:
+        pass
+    try:
+        os.mkdir(repoDir)
+    except FileExistsError:
+        sys.exit('ERROR: file exists "{0}"'.format(repoDir))
+    return repoDir
 
-    session = Session()
-    if input.username:
-        session.login(username=input.username, oAuthToken=input.oAuthToken)
-    else:
-        session.login()
+def doBackup(input, session, gitCache, repoOrg, repoName):
+    fullRepo = os.path.join(repoOrg, repoName)
+    print('Finding all collaborator forks for "{0}"...'.format(fullRepo))
+    try:
+        users = session.getUsers(fullRepo)
+    except:
+        # At least backup root repo
+        if not input.printForkListOnly:
+            repoDir = createDirTree(input.backupDir, repoOrg, repoName)
+            currentDir = os.path.join(repoDir, repoOrg)
+            print('Backing up "{0}" to "{1}"...'.format(fullRepo, currentDir))
+            backupRepo(currentDir, fullRepo)
+        raise
 
-    # Test credentials before doing anything else
-    session.zenTest()
+    print('{0} users found as collaborators of {1}'.format(len(users), fullRepo))
+    usersToBackup = list()
 
-    print('Finding all collaborator forks...')
-    users = session.getUsers(input.repo)
-    print('{0} users found as collaborators of {1}'.format(len(users), input.repo))
-    usersToBackup = set()
     for user in users:
         if input.verbose:
             print('    ' + user)
 
-        if session.hasRepo(user, repoName):
-            usersToBackup.add(user)
+        if user not in gitCache.userRepos:
+            gitCache.addUserRepos(user, session.getRepos(user))
 
+        if gitCache.userHasRepo(user, repoName):
+            usersToBackup.append(user)
+
+    usersToBackup.sort()
     print('{0} collaborators have forks of {1}'.format(len(usersToBackup), repoName))
 
     if input.printForkListOnly:
@@ -201,25 +304,17 @@ def doBackup(input):
             print('    ' + user)
         return
 
-    try:
-        os.mkdir(input.backupDir)
-    except FileExistsError:
-        pass
-    todaysDir = os.path.join(input.backupDir, timeStamp())
-    try:
-        os.mkdir(todaysDir)
-    except FileExistsError:
-        sys.exit('ERROR: file exists "{0}"'.format(todaysDir))
+    repoDir = createDirTree(input.backupDir, repoOrg, repoName)
 
     # First backup root repository
-    currentDir = os.path.join(todaysDir, repoOrg)
-    print('Backing up "{0}" to {1}...'.format(input.repo, currentDir))
-    backupRepo(currentDir, input.repo)
+    currentDir = os.path.join(repoDir, repoOrg)
+    print('Backing up "{0}" to "{1}"...'.format(fullRepo, currentDir))
+    backupRepo(currentDir, fullRepo)
 
     # backup all user forks of repo
     print('Backing up all collaborator forks...')
     for user in usersToBackup:
-        currentDir = os.path.join(todaysDir, user)
+        currentDir = os.path.join(repoDir, user)
         repo = os.path.join(user, repoName)
         print('    Backing up "{0}" to "{1}"...'.format(repo, currentDir))
         backupRepo(currentDir, repo)
@@ -259,28 +354,79 @@ def doPurge(input):
 
     print('Purge complete')
 
+class GitCache:
+    def __init__(self):
+        self.userRepos = {}  # to store JSON response from https://api.github.com/user/:user/repos
+
+    def addUserRepos(self, user, repos):
+        if user not in self.userRepos:
+            self.userRepos[user] = repos
+
+    def getUserRepos(self, user):
+        return self.userRepos.get(user)
+
+    def userHasRepo(self, user, searchRepo):
+        repoInfo = self.getUserRepos(user)
+        if not repoInfo:
+            return None
+        for repo in repoInfo:
+            if repo['name'] == searchRepo:
+                return True
+
 def main(argv):
+
+    start = timeit.default_timer()
 
     input = Input(argv)
     input.parse()
 
     print('\n\n\n{0}'.format(timeStamp(fmt='%Y-%m-%d-%H-%M-%S')))
 
-    if not input.purgeOnly:
-        try:
-            doBackup(input)
-        except OSError as err:
-            sys.exit('ERROR: {0}'.format(err))
-        except:
-            raise
+    gitCache = GitCache()
 
+    if not input.purgeOnly:
+        session = Session()
+        if input.username:
+            session.login(username=input.username, oAuthToken=input.oAuthToken)
+        else:
+            session.login()
+
+        repoList = list()
+        if input.org:
+            repoOrg = input.repo
+            print('Treating "{0}" as git organization.'.format(repoOrg))
+            repoList = session.getOrgRepos(repoOrg)
+        else:
+            repoOrg, repoName = os.path.split(input.repo)
+            repoList.append(repoName)
+
+        for repo in repoList:
+            try:
+                doBackup(input, session, gitCache, repoOrg, repo)
+            except HttpError as err:
+                print(err.str())
+                print('WARNING: skipping "{0}"'.format(os.path.join(repoOrg, repo)))
+                pass
+
+
+        print('\nSummary:')
+        print('Total number of requests made: {0}'.format(session.requestCount))
+        print('Total number of collaborators with forked IP of "{0}": {1}'.format(input.repo, len(gitCache.userRepos)))
+        for user in gitCache.userRepos:
+            print('    {0}'.format(user))
+
+    doPurge(input)
+
+    print('Total wallclock time taken: {0} (seconds)'.format(timeit.default_timer() - start))
+
+
+if __name__ == "__main__":
     try:
-        doPurge(input)
+        main(sys.argv[1:])
     except OSError as err:
         sys.exit('ERROR: {0}'.format(err))
+    except HttpError as err:
+        sys.exit('ERROR: {0}'.format(err.str()))
     except:
         # add proper error handling and logging etc
         raise
-
-if __name__ == "__main__":
-    main(sys.argv[1:])
