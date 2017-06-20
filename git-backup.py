@@ -73,12 +73,10 @@ class Session:
     def zenTest(self):
         url = os.path.join(self.api, 'zen')
         body = self.doCurl(url)
-        if body:
-            try:
-                body = json.loads(body)
-            except json.JSONDecodeError:
-                pass
+        if body and body[0] == '{':  # check if JSON - JSONDecodeError not in python 2.7
+            body = json.loads(body)
         self.checkError(body)
+        sys.exit()
         return body
 
     def parseHeader(self, headerLine):
