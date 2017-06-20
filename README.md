@@ -18,6 +18,11 @@ The following two aids are used to reduce the total number of Git API requests (
  * ``?per_page=100``
  * responses are cached
 
+## Dependencies
+
+ * Python 3.5
+ * [PycURL](http://pycurl.io/docs/latest/install.html)
+
 ## Usage
 ```
 usage: git-backup.py [-h] [-u <username>] [--oauth <token>] [-o <path>]
