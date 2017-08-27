@@ -179,6 +179,7 @@ class Input:
         self.purgeOnly = False
         self.oAuthToken = None
         self.org = False
+        self.ignore = []
 
     def parse(self):
         parser = argparse.ArgumentParser(description='github repo backup')
@@ -200,6 +201,8 @@ class Input:
                              help='Number of backups to maintain in backup dir. Older dirs will be checked and purged upon future backup (default 0 => forever)')
         parser.add_argument('-p', '--purge_only', dest='purgeOnly', action='store_true', default=self.purgeOnly,
                              help='Only purge older backups')
+        parser.add_argument('--ignore', dest='ignore', default=self.ignore, nargs='*',
+                             help="When using --org, list repos to ignore (don't backup)")
         args = parser.parse_args(self.argv)
 
         if args.repo == None:
@@ -216,6 +219,7 @@ class Input:
         if args.oAuthToken:
             self.oAuthToken = args.oAuthToken[0]
 
+        self.ignore = args.ignore
         self.backupDir = args.backupDir[0]
         self.verbose = args.verbose
         self.printForkListOnly = args.printForkListOnly
@@ -396,6 +400,12 @@ def main(argv):
             repoOrg = input.repo
             print('Treating "{0}" as git organization.'.format(repoOrg))
             repoList = session.getOrgRepos(repoOrg)
+            for repo in input.ignore:
+                try:
+                    repoList.remove(repo)
+                    print('WARNING: ignoring "{0}" from backup (--ignore)'.format(repo))
+                except:
+                    continue
         else:
             repoOrg, repoName = os.path.split(input.repo)
             repoList.append(repoName)
