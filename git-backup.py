@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 import argparse
 import datetime
 from getpass import getpass
@@ -11,6 +13,7 @@ import sys
 import timeit
 
 import pycurl
+
 
 class HttpError(Exception):
     def __init__(self, _code, _message):
@@ -276,6 +279,7 @@ def createDirTree(root, repoOrg, repoName):
 def doBackup(input, session, gitCache, repoOrg, repoName):
     fullRepo = os.path.join(repoOrg, repoName)
     print('Finding all collaborator forks for "{0}"...'.format(fullRepo))
+    start = timeit.default_timer()
     try:
         users = session.getUsers(fullRepo)
     except:
@@ -283,8 +287,10 @@ def doBackup(input, session, gitCache, repoOrg, repoName):
         if not input.printForkListOnly:
             repoDir = createDirTree(input.backupDir, repoOrg, repoName)
             currentDir = os.path.join(repoDir, repoOrg)
-            print('Backing up "{0}" to "{1}"...'.format(fullRepo, currentDir))
+            print('Backing up "{0}" to "{1}"...'.format(fullRepo, currentDir), end='')
+            t1 = timeit.default_timer()
             backupRepo(currentDir, fullRepo)
+            print(" ({:.2f}s)".format(timeit.default_timer() - t1))
         raise
 
     print('{0} users found as collaborators of {1}'.format(len(users), fullRepo))
@@ -312,18 +318,22 @@ def doBackup(input, session, gitCache, repoOrg, repoName):
 
     # First backup root repository
     currentDir = os.path.join(repoDir, repoOrg)
-    print('Backing up "{0}" to "{1}"...'.format(fullRepo, currentDir))
+    print('Backing up "{0}" to "{1}"...'.format(fullRepo, currentDir), end='')
+    t1 = timeit.default_timer()
     backupRepo(currentDir, fullRepo)
+    print(" ({:.2f}s)".format(timeit.default_timer() - t1))
 
     # backup all user forks of repo
     print('Backing up all collaborator forks...')
     for user in usersToBackup:
         currentDir = os.path.join(repoDir, user)
         repo = os.path.join(user, repoName)
-        print('    Backing up "{0}" to "{1}"...'.format(repo, currentDir))
+        print('    Backing up "{0}" to "{1}"...'.format(repo, currentDir), end='')
+        t1 = timeit.default_timer()
         backupRepo(currentDir, repo)
+        print(" ({:.2f}s)".format(timeit.default_timer() - t1))
 
-    print('Backup complete')
+    print('Backup complete ({:.2f}s)'.format(timeit.default_timer() - start))
 
 def doPurge(input):
 
@@ -427,7 +437,7 @@ def main(argv):
 
     doPurge(input)
 
-    print('Total wallclock time taken: {0} (seconds)'.format(timeit.default_timer() - start))
+    print('Total wallclock time taken: {0:.2f}s'.format(timeit.default_timer() - start))
 
 
 if __name__ == "__main__":
