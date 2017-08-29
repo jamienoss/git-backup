@@ -307,7 +307,8 @@ def doBackup(input, session, gitCache, repoOrg, repoName):
             usersToBackup.append(user)
 
     usersToBackup.sort()
-    print('{0} collaborators have forks of {1}'.format(len(usersToBackup), repoName))
+    nUsers = len(usersToBackup)
+    print('{0} collaborators have forks of {1}'.format(nUsers, repoName))
 
     if input.printForkListOnly:
         for user in usersToBackup:
@@ -325,10 +326,12 @@ def doBackup(input, session, gitCache, repoOrg, repoName):
 
     # backup all user forks of repo
     print('Backing up all collaborator forks...')
+    count = 0
     for user in usersToBackup:
+        count += 1
         currentDir = os.path.join(repoDir, user)
         repo = os.path.join(user, repoName)
-        print('    Backing up "{0}" to "{1}"...'.format(repo, currentDir), end='')
+        print('    ({}/{})  Backing up "{}" to "{}"...'.format(count, nUsers, repo, currentDir), end='')
         t1 = timeit.default_timer()
         backupRepo(currentDir, repo)
         print(" ({:.2f}s)".format(timeit.default_timer() - t1))
@@ -420,8 +423,12 @@ def main(argv):
             repoOrg, repoName = os.path.split(input.repo)
             repoList.append(repoName)
 
+        totalRepos = len(repoList)
+        count = 0
         for repo in repoList:
+            count += 1
             try:
+                print("({}/{})  ".format(count, totalRepos), end='')
                 doBackup(input, session, gitCache, repoOrg, repo)
             except HttpError as err:
                 print(err.str())
