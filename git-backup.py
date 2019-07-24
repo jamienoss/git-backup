@@ -29,7 +29,7 @@ class Session:
     def __init__(self):
         self.username = None
         self.password = None
-        self.oauthToken = None
+        self.oAuthToken = None
         self.c = pycurl.Curl()
         self.nPages = 1
         self.parseHeaderFlag = False
@@ -125,6 +125,7 @@ class Session:
         if body:
             body = json.loads(body)
         self.checkError(body)
+        body = body if isinstance(body, list) else [body]
         response.extend(body)
 
         if self.nPages == 1:
@@ -138,6 +139,7 @@ class Session:
             if body:
                 body = json.loads(body)
             self.checkError(body)
+            body = body if isinstance(body, list) else [body]
             response.extend(body)
 
         if not keepAlive:
@@ -145,8 +147,14 @@ class Session:
         return response
 
     def getCollaborators(self, repo):
+        if self.isPrivate(repo):
+            return []
         url = os.path.join(self.api, 'repos', str(repo), 'collaborators')
         return self.getCurl(url)
+
+    def isPrivate(self, repo):
+        url = os.path.join(self.api, 'repos', repo)
+        return self.getCurl(url)[0]['private']
 
     def getUsers(self, repo):
         users = list()
@@ -169,19 +177,32 @@ class Session:
         url = os.path.join(self.api, 'users', user, 'repos')
         return self.getCurl(url)
 
+    def getTeamRepos(self, org, team):
+        url = os.path.join(self.api, 'orgs', org,'teams', team)#
+        response = self.getCurl(url)
+        teamID = (response[0]['id'])
+        url = os.path.join(self.api, 'teams', str(teamID), 'repos')
+        response = self.getCurl(url)
+        repos = []
+        for repo in response:
+            repos.append(repo['name'])
+        repos.sort()
+        return repos
+
 class Input:
     def __init__(self, _argv):
         self.argv = _argv
         self.repo = None
         self.username = None
         self.backupDir = './'
-        self.oauthToken = None
         self.verbose = False
         self.printForkListOnly = False
         self.history = 0
         self.purgeOnly = False
         self.oAuthToken = None
         self.org = False
+        self.team = False
+        self.useSSH = False
         self.ignore = []
 
     def parse(self):
@@ -206,6 +227,11 @@ class Input:
                              help='Only purge older backups')
         parser.add_argument('--ignore', dest='ignore', default=self.ignore, nargs='*',
                              help="When using --org, list repos to ignore (don't backup)")
+        parser.add_argument('--team', dest='team', action='store_true',
+                            help='Treats positional argument <repo> as a git team to backup', default=self.team)
+        parser.add_argument('--ssh', dest='useSSH', action='store_true',
+                            default=self.useSSH,
+                            help='Only print the list of users with forks of <repo>')
         args = parser.parse_args(self.argv)
 
         if args.repo == None:
@@ -227,6 +253,8 @@ class Input:
         self.verbose = args.verbose
         self.printForkListOnly = args.printForkListOnly
         self.org = args.org
+        self.team = args.team
+        self.useSSH = args.useSSH
 
         if args.history:
             self.history = int(args.history[0])
@@ -235,12 +263,17 @@ class Input:
 def timeStamp(fmt='%Y-%m-%d'):
     return datetime.datetime.now().strftime(fmt)
 
-def gitClone(repo):
-    github = 'https://github.com'
-    fullRepo = os.path.join(github, repo) + '.git'
-    response = subprocess.run(['git', 'clone', fullRepo], shell=False, check=False, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def gitClone(repo, useSSH=False):
 
-def backupRepo(dir, repo):
+    github = 'ssh://git@github.com' if useSSH else 'https://github.com:'
+    fullRepo = os.path.join(github, repo)
+    response = subprocess.run(['git', 'clone', fullRepo], shell=False,
+                              check=False,
+                              universal_newlines=True,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+
+def backupRepo(dir, repo, useSSH=False):
     currentPath = os.getcwd()
     try:
         os.mkdir(dir)
@@ -250,7 +283,7 @@ def backupRepo(dir, repo):
         sys.exit('ERROR: {0}'.format(err))
 
     os.chdir(dir)
-    gitClone(repo)
+    gitClone(repo, useSSH=useSSH)
     os.chdir(currentPath)
 
 def createDirTree(root, repoOrg, repoName):
@@ -289,7 +322,7 @@ def doBackup(input, session, gitCache, repoOrg, repoName):
             currentDir = os.path.join(repoDir, repoOrg)
             print('Backing up "{0}" to "{1}"...'.format(fullRepo, currentDir), end='')
             t1 = timeit.default_timer()
-            backupRepo(currentDir, fullRepo)
+            backupRepo(currentDir, fullRepo, useSSH=session.useSSH)
             print(" ({:.2f}s)".format(timeit.default_timer() - t1))
         raise
 
@@ -321,7 +354,7 @@ def doBackup(input, session, gitCache, repoOrg, repoName):
     currentDir = os.path.join(repoDir, repoOrg)
     print('Backing up "{0}" to "{1}"...'.format(fullRepo, currentDir), end='')
     t1 = timeit.default_timer()
-    backupRepo(currentDir, fullRepo)
+    backupRepo(currentDir, fullRepo, useSSH=input.useSSH)
     print(" ({:.2f}s)".format(timeit.default_timer() - t1))
 
     # backup all user forks of repo
@@ -333,7 +366,7 @@ def doBackup(input, session, gitCache, repoOrg, repoName):
         repo = os.path.join(user, repoName)
         print('    ({}/{})  Backing up "{}" to "{}"...'.format(count, nUsers, repo, currentDir), end='')
         t1 = timeit.default_timer()
-        backupRepo(currentDir, repo)
+        backupRepo(currentDir, repo, useSSH=input.useSSH)
         print(" ({:.2f}s)".format(timeit.default_timer() - t1))
 
     print('Backup complete ({:.2f}s)'.format(timeit.default_timer() - start))
@@ -413,6 +446,16 @@ def main(argv):
             repoOrg = input.repo
             print('Treating "{0}" as git organization.'.format(repoOrg))
             repoList = session.getOrgRepos(repoOrg)
+            for repo in input.ignore:
+                try:
+                    repoList.remove(repo)
+                    print('WARNING: ignoring "{0}" from backup (--ignore)'.format(repo))
+                except:
+                    continue
+        elif input.team:
+            repoOrg, repoTeam = os.path.split(input.repo)
+            print('Treating "{0}" as git team.'.format(repoTeam))
+            repoList = session.getTeamRepos(repoOrg, repoTeam)
             for repo in input.ignore:
                 try:
                     repoList.remove(repo)
